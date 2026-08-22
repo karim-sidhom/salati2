@@ -397,12 +397,7 @@
                 <div class="rakat-count-value" id="rakat-nafl-count">0</div>
             </div>
         </div>
-        <div class="rakat-btn-row">
-            <button id="rakat-toggle-btn" class="rakat-btn" data-i18n="rakat_start_btn">🎙️ بدء عدّ الركعات</button>
-        </div>
-        <button id="rakat-enable-auto-btn" class="rakat-btn secondary" style="width:100%; display:none;" data-i18n="rakat_enable_auto_btn">🎙️ فعّل التشغيل التلقائي (مرة واحدة)</button>
-        <button id="rakat-reset-btn" class="rakat-btn secondary" style="width:100%;" data-i18n="rakat_reset_btn">↺ إعادة الضبط</button>
-        <div class="rakat-status" id="rakat-status" data-i18n="rakat_hint">يبدأ العدّ تلقائياً عند دخول وقت الإقامة — أو اضغط للبدء يدوياً</div>
+        <div class="rakat-status" id="rakat-status" data-i18n="rakat_hint">يبدأ العدّ تلقائياً عند دخول وقت الإقامة</div>
     </div>
 
     <div class="prayer-grid" id="prayer-grid"></div>
@@ -2036,8 +2031,9 @@ let rakatState = {
     naflCount: 0,
     inFardhWindow: false,
     hasRealIqama: false,
-    takbirInRakat: 0, // عدد التكبيرات المسموعة ضمن الركعة الجارية (0..3، عند الوصول لـ4 تكتمل الركعة)
+    takbirInRakat: 0, // عدد التكبيرات المسموعة ضمن الركعة الجارية (0..4، عند الوصول لـ5 تكتمل الركعة)
     ihramSkipped: false, // تجاهل أول تكبيرة (تكبيرة الإحرام) عند بدء الجلسة
+    awaitingStandTakbir: false, // تكبيرة القيام من التشهد الأول بعد الركعة الثانية (في الصلاة الثلاثية/الرباعية) — تُستهلك بلا احتساب
     autoStartedKey: null, // معرّف الصلاة (id_تاريخ) التي بدأ الاستماع من أجلها بالفعل
     lastTakbirTs: 0,
     recognition: null,
@@ -2135,6 +2131,7 @@ async function refreshRakatContext() {
         rakatState.naflCount = 0;
         rakatState.takbirInRakat = 0;
         rakatState.ihramSkipped = false;
+        rakatState.awaitingStandTakbir = false;
     }
     rakatState.prayerId = prayerId;
     rakatState.targetRakat = RAKAT_COUNTS[prayerId];
@@ -2160,7 +2157,9 @@ function setRakatStatus(msg, isError) {
 
 // ── عدّ الركعات اعتماداً على عدد التكبيرات المسموعة فقط ──
 // أول تكبيرة مسموعة بعد الضغط على "بدء" تُعتبر تكبيرة الإحرام فتُتجاهل من الحساب.
-// بعدها: كل 4 تكبيرات (ركوع، سجود1، جلسة، سجود2) = ركعة واحدة مكتملة.
+// بعدها: كل 5 تكبيرات (قيام→ركوع، ركوع→سجود1، سجود1→جلسة، جلسة→سجود2، سجود2→قيام/جلسة)
+// = ركعة واحدة مكتملة. في الصلاة ذات الثلاث أو الأربع ركعات، بعد إتمام الركعة الثانية
+// تأتي تكبيرة إضافية (القيام من التشهد الأول) لا تُحسب من أي ركعة.
 function advanceOneRakat() {
     // مع وجود إقامة حقيقية: التوقيت هو الفيصل بين النافلة والفرض (قبل الإقامة =
     // نافلة، بعدها = فرض حتى تكتمل العدد). بدون إقامة حقيقية: العدد وحده يحدّد.
@@ -2180,10 +2179,20 @@ function registerTakbir() {
         updateRakatUI();
         return;
     }
+    if (rakatState.awaitingStandTakbir) {
+        // تكبيرة القيام من التشهد الأول — لا تُحسب من أي ركعة
+        rakatState.awaitingStandTakbir = false;
+        updateRakatUI();
+        return;
+    }
     rakatState.takbirInRakat++;
-    if (rakatState.takbirInRakat >= 4) {
+    if (rakatState.takbirInRakat >= 5) {
         rakatState.takbirInRakat = 0;
         advanceOneRakat();
+        const doneCount = rakatState.fardhCount + rakatState.naflCount;
+        if (doneCount === 2 && rakatState.targetRakat > 2) {
+            rakatState.awaitingStandTakbir = true;
+        }
     }
     updateRakatUI();
 }
@@ -2235,10 +2244,10 @@ function stopRakatSpeech() {
 function startRakatListening() {
     rakatState.takbirInRakat = 0;
     rakatState.ihramSkipped = false;
+    rakatState.awaitingStandTakbir = false;
     const okSpeech = startRakatSpeech();
     if (!okSpeech) return false;
     rakatState.active = true;
-    document.getElementById('rakat-toggle-btn').textContent = t('rakat_stop_btn');
     setRakatStatus('🎙️ الاستماع نشط — تحدث بصوت التكبير أثناء الصلاة', false);
     updateRakatUI();
     if (rakatState.contextInterval) clearInterval(rakatState.contextInterval);
@@ -2246,25 +2255,6 @@ function startRakatListening() {
         if (rakatState.active) { refreshRakatContext(); updateRakatUI(); }
     }, 30000);
     return true;
-}
-
-async function toggleRakatTracking() {
-    const btn = document.getElementById('rakat-toggle-btn');
-    if (rakatState.active) {
-        rakatState.active = false;
-        stopRakatSpeech();
-        if (rakatState.contextInterval) { clearInterval(rakatState.contextInterval); rakatState.contextInterval = null; }
-        btn.textContent = t('rakat_start_btn');
-        setRakatStatus('تم إيقاف العدّ', false);
-        return;
-    }
-    await refreshRakatContext();
-    // تشغيل يدوي = يُعتبر بمثابة تشغيل تلقائي مستهلك لهذه الصلاة فلا يُعاد تلقائياً
-    if (rakatState.prayerId) {
-        rakatState.autoStartedKey = rakatState.prayerId + '_' + new Date().toDateString();
-    }
-    markMicAsked(); // الضغط اليدوي بحد ذاته يمنح الإذن — لا داعٍ لطلبه لاحقاً
-    startRakatListening();
 }
 
 // يفحص دورياً: هل دخلنا وقت الإقامة لصلاة لم تُبدأ بعد؟ (الموقع عبر GPS
@@ -2280,22 +2270,8 @@ async function checkAutoStartRakat() {
     startRakatListening();
 }
 
-function resetRakatCounter() {
-    rakatState.fardhCount = 0;
-    rakatState.naflCount = 0;
-    rakatState.takbirInRakat = 0;
-    rakatState.ihramSkipped = false;
-    updateRakatUI();
-}
-
 function initRakatCounter() {
-    document.getElementById('rakat-toggle-btn').onclick = toggleRakatTracking;
-    document.getElementById('rakat-reset-btn').onclick = resetRakatCounter;
-    const enableBtn = document.getElementById('rakat-enable-auto-btn');
-    if (enableBtn) {
-        enableBtn.onclick = requestMicOnce;
-        enableBtn.style.display = hasMicBeenAsked() ? 'none' : 'block';
-    }
+    if (!hasMicBeenAsked()) requestMicOnce(); // طلب إذن الميكروفون تلقائياً عند فتح التطبيق، بلا أي ضغطة زر
     refreshRakatContext().then(updateRakatUI);
     checkAutoStartRakat();
     setInterval(checkAutoStartRakat, 20000);
@@ -2817,6 +2793,12 @@ function initApp(lat, lng) {
     updateTimes();
     if (updateTimesInterval) clearInterval(updateTimesInterval);
     updateTimesInterval = setInterval(updateTimes, 60000);
+
+    // دي مزامنة فورية لعداد الركعات: بمجرد توفر موقع حقيقي وأوقات محسوبة محلياً
+    // (lastCountdownPrayers)، لا ننتظر الدورة القادمة (20 ثانية) — نصحّح مباشرة.
+    if (typeof refreshRakatContext === 'function' && typeof updateRakatUI === 'function') {
+        refreshRakatContext().then(updateRakatUI);
+    }
 
     const geoPromise = reverseGeocode(lat, lng);
     findNearbyMosques(lat, lng, geoPromise);
