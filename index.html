@@ -2019,6 +2019,9 @@ function resolveIqamaTime(adhanT, rawIqama) {
 const RAKAT_ORDER = ['fajr', 'dhuhr', 'asr', 'maghrib', 'isha'];
 const RAKAT_COUNTS = { fajr: 2, dhuhr: 4, asr: 4, maghrib: 3, isha: 4 };
 const TAKBIR_PATTERNS = [/الله\s*اكبر/gi, /الله\s*أكبر/gi, /allahu?\s*akbar/gi];
+// مرساة تصحيح: "الله لمن حمده" تُقال بعد القيام من الركوع مباشرة (بين تكبيرة
+// الركوع وتكبيرة السجود) — تُستخدم لتصحيح العدّ إذا فاتت تكبيرة الركوع الأولى.
+const SAMIA_PATTERNS = [/الله\s*لمن\s*حمده/gi, /سمع\s*الله\s*لمن\s*حمده/gi];
 // عند عدم توفر وقت إقامة حقيقي من مسجد مسجّل (لا بيانات mawaqit قريبة)، نعتمد
 // وقت الأذان + هامش تقريبي بدل اعتبار الأذان نفسه بداية الفرض مباشرة
 const RAKAT_MIC_ASKED_KEY = 'rakat_mic_permission_asked'; // مرة واحدة فقط طوال عمر التطبيق
@@ -2057,7 +2060,7 @@ function requestMicOnce() {
     const SR = window.SpeechRecognition || window.webkitSpeechRecognition;
     if (!SR) { setRakatStatus('⚠️ متصفحك لا يدعم التعرف الصوتي', true); markMicAsked(); return; }
     const rec = new SR();
-    rec.lang = 'ar-SA';
+    rec.lang = 'ar-TN';
     rec.onerror = function () {};
     rec.onend = function () {
         markMicAsked();
@@ -2077,6 +2080,23 @@ function countTakbirs(text) {
         if (matches) count += matches.length;
     }
     return count;
+}
+
+// يفحص وجود "الله لمن حمده" — إن وُجدت، معناها أننا خرجنا للتو من الركوع
+// (بعد تكبيرة واحدة في الركعة الجارية). إن كان العدّاد لا يزال عند 0،
+// فهذا يعني أن تكبيرة الركوع الأولى فاتت التعرف الصوتي، فنصحح العدّ يدوياً.
+function checkSamiaAnchor(text) {
+    if (!text || !rakatState.active) return;
+    let found = false;
+    for (const re of SAMIA_PATTERNS) {
+        if (re.test(text)) { found = true; break; }
+    }
+    if (!found) return;
+    if (rakatState.ihramSkipped && rakatState.takbirInRakat === 0) {
+        rakatState.takbirInRakat = 1;
+        setRakatStatus('🔄 تم تصحيح العدّ تلقائياً بالاعتماد على "الله لمن حمده"', false);
+        updateRakatUI();
+    }
 }
 
 // يجلب أوقات الإقامة لأقرب مسجد مسجّل على mawaqit.net من الموقع الحالي
@@ -2207,17 +2227,29 @@ function handleTakbir(count) {
 }
 
 // ── التعرف الصوتي على التكبير (Web Speech API) ──
-function startRakatSpeech() {
+// نبدّل اللهجة العربية عند كل إعادة تشغيل — كل اللهجات العربية المتوفرة بالتناوب
+// بدل الاعتماد على لهجة واحدة فقط، بحثاً عن أفضل تعرّف ممكن على التكبير.
+const RAKAT_LANG_LIST = [
+    'ar-TN', 'ar-SA', 'ar-EG', 'ar-DZ', 'ar-MA', 'ar-LY',
+    'ar-JO', 'ar-LB', 'ar-SY', 'ar-IQ', 'ar-KW', 'ar-QA',
+    'ar-BH', 'ar-AE', 'ar-OM', 'ar-YE', 'ar-PS'
+];
+let rakatLangIndex = 0;
+
+function startOneRecognitionCycle() {
     const SR = window.SpeechRecognition || window.webkitSpeechRecognition;
     if (!SR) { setRakatStatus('⚠️ متصفحك لا يدعم التعرف الصوتي', true); return false; }
     const rec = new SR();
-    rec.lang = 'ar-SA';
+    rec.lang = RAKAT_LANG_LIST[rakatLangIndex % RAKAT_LANG_LIST.length];
+    rakatLangIndex++;
     rec.continuous = true;
     rec.interimResults = true;
     rec.onresult = function (event) {
         for (let i = event.resultIndex; i < event.results.length; i++) {
-            const n = countTakbirs(event.results[i][0].transcript);
+            const transcript = event.results[i][0].transcript;
+            const n = countTakbirs(transcript);
             if (n > 0) handleTakbir(n);
+            checkSamiaAnchor(transcript);
         }
     };
     rec.onerror = function (e) {
@@ -2226,11 +2258,16 @@ function startRakatSpeech() {
         }
     };
     rec.onend = function () {
-        if (rakatState.active) { try { rec.start(); } catch (e) {} }
+        if (rakatState.active) { startOneRecognitionCycle(); }
     };
     try { rec.start(); } catch (e) { return false; }
     rakatState.recognition = rec;
     return true;
+}
+
+function startRakatSpeech() {
+    rakatLangIndex = 0;
+    return startOneRecognitionCycle();
 }
 
 function stopRakatSpeech() {
